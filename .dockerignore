@@ -1,0 +1,15 @@
+# SHL Assessment Recommender
+
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.egg-info/
+dist/
+build/
+.git/
+GenAI_SampleConversations/
+SHL_AI_Intern_Assignment.pdf
+analyze_catalog.py
+test_quick.py
+test_single.py

@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Environment
+.env
+GenAI_SampleConversations/key.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing
+test_quick.py
+test_single.py
+analyze_catalog.py
+
+# Assignment
+SHL_AI_Intern_Assignment.pdf
+
+# OS
+.DS_Store
+Thumbs.db
