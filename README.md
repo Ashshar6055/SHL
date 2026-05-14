@@ -4,6 +4,17 @@
 
 ---
 
+## 🟢 Live Demo & API Endpoints
+
+The API is fully deployed and production-ready on Render.
+
+*   **Base URL:** `https://shl-assessment-agent-tk8z.onrender.com`
+*   **Interactive Docs (Swagger):** [https://shl-assessment-agent-tk8z.onrender.com/docs](https://shl-assessment-agent-tk8z.onrender.com/docs)
+*   **Health Check:** `GET /health`
+*   **Chat Endpoint:** `POST /chat`
+
+---
+
 ## 1. Project Overview
 
 The SHL Assessment Recommender is a backend AI service designed to assist hiring managers and talent acquisition teams in selecting the appropriate SHL assessment products. Operating via a RESTful API (`POST /chat`), the agent conducts multi-turn conversations—gathering context, clarifying needs, refining shortlists, and ultimately returning grounded, catalog-validated recommendations.
