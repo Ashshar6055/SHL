@@ -28,3 +28,12 @@ SHL_AI_Intern_Assignment.pdf
 # OS
 .DS_Store
 Thumbs.db
+
+# Virtual Environments
+venv/
+.venv/
+env/
+
+# Logs
+logs/
+*.log

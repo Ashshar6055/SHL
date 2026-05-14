@@ -2,6 +2,8 @@
 Core agent logic for the SHL Conversational Assessment Recommender.
 Handles conversation state reconstruction, intent classification,
 retrieval orchestration, LLM interaction, and response post-processing.
+
+Uses OpenRouter API (OpenAI-compatible) for LLM access.
 """
 
 import json
@@ -9,10 +11,9 @@ import re
 import os
 import time
 import traceback
-from typing import List, Dict, Any, Optional, Tuple
+import requests as http_requests
+from typing import List, Optional
 
-import google.generativeai as genai
-from google.api_core import retry as api_retry
 from dotenv import load_dotenv
 
 from app.models import (
@@ -21,52 +22,34 @@ from app.models import (
 )
 from app.catalog import catalog
 from app.retriever import retriever
-from app.prompts import SYSTEM_PROMPT, RETRIEVAL_CONTEXT_TEMPLATE, REFINEMENT_CONTEXT_TEMPLATE
+from app.prompts import SYSTEM_PROMPT, RETRIEVAL_CONTEXT_TEMPLATE, REFINEMENT_CONTEXT_TEMPLATE, FLAGSHIP_PRODUCTS
 
 load_dotenv()
 
-# Models to try in order (fallback chain)
+# Models to try in order (fallback chain) — OpenRouter model IDs
 MODEL_CHAIN = [
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
+    "google/gemini-2.0-flash-001",
+    "google/gemini-2.0-flash-lite-001",
 ]
+
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
 class Agent:
     """
     Stateless conversational agent.
     Reconstructs context from message history on every call.
+    Uses OpenRouter API for LLM access.
     """
 
     def __init__(self):
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            raise ValueError("GEMINI_API_KEY not found in environment")
-
-        genai.configure(api_key=api_key)
-
-        # Initialize models in fallback order
-        self.models = []
-        for model_name in MODEL_CHAIN:
-            try:
-                model = genai.GenerativeModel(
-                    model_name=model_name,
-                    generation_config={
-                        "temperature": 0.3,
-                        "top_p": 0.9,
-                        "max_output_tokens": 4096,
-                        "response_mime_type": "application/json",
-                    },
-                )
-                self.models.append((model_name, model))
-                print(f"[Agent] Initialized model: {model_name}")
-            except Exception as e:
-                print(f"[Agent] Could not initialize {model_name}: {e}")
-
-        if not self.models:
-            print("[Agent] WARNING: No LLM models available — will use deterministic fallback only")
-
-        print(f"[Agent] Ready with {len(self.models)} model(s)")
+        self.api_key = os.getenv("OPENROUTER_API_KEY", "")
+        if not self.api_key:
+            print("[Agent] WARNING: OPENROUTER_API_KEY not found, will use deterministic fallback only")
+        else:
+            masked = self.api_key[:8] + "..." + self.api_key[-4:]
+            print(f"[Agent] OpenRouter key loaded: {masked}")
+        print(f"[Agent] Initialized with {len(MODEL_CHAIN)} model(s): {', '.join(MODEL_CHAIN)}")
 
     def process(self, request: ChatRequest) -> ChatResponse:
         """
@@ -74,7 +57,12 @@ class Agent:
         Never raises — always returns a valid ChatResponse.
         """
         try:
-            messages = request.messages
+            # PAYLOAD TRUNCATION: Prevent massive malicious inputs
+            # Only keep the last 15 messages max
+            messages = request.messages[-15:]
+            for msg in messages:
+                if len(msg.content) > 2000:
+                    msg.content = msg.content[:2000] + "..."
 
             # 1. Reconstruct conversation state
             state = self._reconstruct_state(messages)
@@ -109,7 +97,6 @@ class Agent:
     def _reconstruct_state(self, messages: List[Message]) -> ConversationState:
         """
         Reconstruct conversation state from the full message history.
-        This is called on every request since the API is stateless.
         """
         state = ConversationState()
         state.turn_count = sum(1 for m in messages if m.role == "user")
@@ -196,7 +183,7 @@ class Agent:
         """
         user_messages = [m.content for m in messages if m.role == "user"]
 
-        # Weight recent messages more by repeating
+        # Weight recent messages more
         if len(user_messages) >= 2:
             query = " ".join(user_messages[:-1]) + " " + user_messages[-1] + " " + user_messages[-1]
         else:
@@ -211,13 +198,14 @@ class Agent:
         state: ConversationState,
     ) -> ChatResponse:
         """Try each model in the fallback chain."""
-        last_error = None
+        if not self.api_key:
+            print("[Agent] No API key, using deterministic fallback")
+            return self._deterministic_fallback(messages, retrieved_entries, state)
 
-        for model_name, model in self.models:
+        for model_name in MODEL_CHAIN:
             try:
-                return self._call_llm(model, model_name, messages, retrieved_entries, state)
+                return self._call_openrouter(model_name, messages, retrieved_entries, state)
             except Exception as e:
-                last_error = e
                 print(f"[Agent] Model {model_name} failed: {e}")
                 continue
 
@@ -225,15 +213,17 @@ class Agent:
         print(f"[Agent] All LLM models failed, using deterministic fallback")
         return self._deterministic_fallback(messages, retrieved_entries, state)
 
-    def _call_llm(
+    def _call_openrouter(
         self,
-        model,
         model_name: str,
         messages: List[Message],
         retrieved_entries: List[CatalogEntry],
         state: ConversationState,
     ) -> ChatResponse:
-        """Call a specific Gemini model."""
+        """
+        Call LLM via OpenRouter API (OpenAI-compatible).
+        Hard 20s timeout, no retries.
+        """
         # Format retrieved catalog entries for context
         catalog_context = "\n\n".join(
             entry.to_context_string() for entry in retrieved_entries[:20]
@@ -258,33 +248,48 @@ class Agent:
         else:
             prompt = RETRIEVAL_CONTEXT_TEMPLATE.format(
                 catalog_entries=catalog_context,
+                flagship_products=FLAGSHIP_PRODUCTS,
                 conversation_history=conv_history,
             )
 
-        # Call Gemini with hard timeout — bypass SDK retry completely
-        import concurrent.futures
+        # Build OpenAI-compatible request
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "HTTP-Referer": "https://shl-assessment-recommender.onrender.com",
+            "X-Title": "SHL Assessment Recommender",
+            "Content-Type": "application/json",
+        }
 
-        def _do_call():
-            return model.generate_content(
-                [
-                    {"role": "user", "parts": [SYSTEM_PROMPT]},
-                    {"role": "model", "parts": ["Understood. I will act as SHL's AI Assessment Consultant, strictly following the catalog and output format rules."]},
-                    {"role": "user", "parts": [prompt]},
-                ],
-                request_options={"timeout": 10, "retry": api_retry.Retry(deadline=0.1)},
-            )
+        payload = {
+            "model": model_name,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.3,
+            "top_p": 0.9,
+            "max_tokens": 4096,
+            "response_format": {"type": "json_object"},
+        }
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(_do_call)
-            try:
-                response = future.result(timeout=12)
-            except concurrent.futures.TimeoutError:
-                raise TimeoutError(f"{model_name} timed out after 12s")
+        # Single request, hard 12s timeout, no retries to guarantee fast fallback
+        start = time.time()
+        resp = http_requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=12)
+        elapsed = time.time() - start
 
-        print(f"[Agent] {model_name} responded successfully")
+        if resp.status_code != 200:
+            error_msg = resp.text[:300]
+            raise RuntimeError(f"OpenRouter API {resp.status_code}: {error_msg}")
 
-        # Parse JSON response
-        raw_text = response.text.strip()
+        data = resp.json()
+
+        # Extract text from OpenAI-compatible response
+        try:
+            raw_text = data["choices"][0]["message"]["content"].strip()
+        except (KeyError, IndexError) as e:
+            raise RuntimeError(f"Unexpected response structure: {e}")
+
+        print(f"[Agent] {model_name} responded successfully ({elapsed:.1f}s)")
         return self._parse_llm_response(raw_text)
 
     def _parse_llm_response(self, raw_text: str) -> ChatResponse:
@@ -370,8 +375,7 @@ class Agent:
     ) -> ChatResponse:
         """
         Intelligent deterministic fallback when all LLM models fail.
-        Uses intent classification and retrieval results to produce
-        contextually appropriate responses.
+        Uses intent classification and retrieval results.
         """
         last_user_msg = ""
         for msg in reversed(messages):
@@ -419,10 +423,8 @@ class Agent:
             )
 
         # --- RECOMMEND / REFINE ---
-        # Use top retrieved entries, with some intelligence about diversity
         recs = self._select_diverse_recommendations(retrieved_entries, state)
-
-        reply = f"Based on your requirements, here are the SHL assessments I'd recommend for this role:"
+        reply = "Based on your requirements, here are the SHL assessments I'd recommend for this role:"
 
         return ChatResponse(
             reply=reply,

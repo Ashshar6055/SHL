@@ -5,9 +5,7 @@ Two endpoints: GET /health and POST /chat.
 
 import os
 
-# Fix Keras 3 / transformers compatibility before any ML imports
-os.environ["TF_USE_LEGACY_KERAS"] = "1"
-os.environ["USE_TF"] = "0"
+
 import time
 import traceback
 from contextlib import asynccontextmanager
@@ -45,7 +43,7 @@ async def lifespan(app: FastAPI):
     print(f"\n{'=' * 60}")
     print(f"  Startup complete in {elapsed:.1f}s")
     print(f"  Catalog: {len(catalog.entries)} assessments")
-    print(f"  FAISS index: {retriever.faiss_index.ntotal} vectors")
+    print(f"  BM25 index: {len(retriever.entries)} documents")
     print(f"{'=' * 60}\n")
 
     yield
