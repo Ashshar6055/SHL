@@ -17,6 +17,19 @@ class ChatRequest(BaseModel):
     """Incoming chat request with full conversation history."""
     messages: List[Message] = Field(..., min_length=1, description="Conversation history")
 
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "I am looking for an assessment for a software engineer."
+                    }
+                ]
+            }
+        }
+    }
+
 
 class Recommendation(BaseModel):
     """A single assessment recommendation from the catalog."""
